@@ -1,0 +1,293 @@
+{
+  "schema_version": 2,
+  "voices": [
+    {
+      "id": "banmai",
+      "name": "Ban Mai",
+      "provider": "piper",
+      "provider_voice": "models/piper/banmai.onnx",
+      "language": "vi",
+      "gender": "female",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "chieuthanh",
+      "name": "Chiêu Thanh",
+      "provider": "piper",
+      "provider_voice": "models/piper/chieuthanh.onnx",
+      "language": "vi",
+      "gender": "Male",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "cuc",
+      "name": "Cúc",
+      "provider": "piper",
+      "provider_voice": "models/piper/cuc.onnx",
+      "language": "vi",
+      "gender": "female",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "duyoryx3175",
+      "name": "Duy",
+      "provider": "piper",
+      "provider_voice": "models/piper/duyoryx3175.onnx",
+      "language": "vi",
+      "gender": "male",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "lacphi",
+      "name": "Lạc Phi",
+      "provider": "piper",
+      "provider_voice": "models/piper/lacphi.onnx",
+      "language": "vi",
+      "gender": "male",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "maiphuong",
+      "name": "Mai Phương",
+      "provider": "piper",
+      "provider_voice": "models/piper/maiphuong.onnx",
+      "language": "vi",
+      "gender": "female",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "manhdung",
+      "name": "Mạng Dũng",
+      "provider": "piper",
+      "provider_voice": "models/piper/manhdung.onnx",
+      "language": "vi",
+      "gender": "male",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "minhkhang",
+      "name": "Minh Khang",
+      "provider": "piper",
+      "provider_voice": "models/piper/minhkhang.onnx",
+      "language": "vi",
+      "gender": "male",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "minhquang",
+      "name": "Minh Quang",
+      "provider": "piper",
+      "provider_voice": "models/piper/minhquang.onnx",
+      "language": "vi",
+      "gender": "male",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "ngochuyen",
+      "name": "Ngọc Huyền",
+      "provider": "piper",
+      "provider_voice": "models/piper/ngochuyen.onnx",
+      "language": "vi",
+      "gender": "female",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "ngochuyennew",
+      "name": "Ngọc Huyền (New)",
+      "provider": "piper",
+      "provider_voice": "models/piper/ngochuyennew.onnx",
+      "language": "vi",
+      "gender": "female",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "phuongtrang",
+      "name": "Phương Trang",
+      "provider": "piper",
+      "provider_voice": "models/piper/phuongtrang.onnx",
+      "language": "vi",
+      "gender": "female",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "taian2",
+      "name": "Tài An",
+      "provider": "piper",
+      "provider_voice": "models/piper/taian2.onnx",
+      "language": "vi",
+      "gender": "male",
+      "tier": "free",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ],
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "preview_video_url": "",
+      "preview_video_path": ""
+    },
+    {
+      "id": "vi_VN-vais1000-medium",
+      "name": "Vàng",
+      "provider": "piper",
+      "provider_voice": "models/piper/vi_VN-vais1000-medium.onnx",
+      "language": "vi",
+      "gender": "female",
+      "tier": "free",
+      "preview_video_url": "",
+      "preview_video_path": "",
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ]
+    },
+    {
+      "id": "en_US-amy-medium",
+      "name": "Amy (English)",
+      "provider": "piper",
+      "provider_voice": "models/piper-en/en_US-amy-medium.onnx",
+      "language": "en",
+      "gender": "female",
+      "tier": "free",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ],
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "preview_video_url": "",
+      "preview_video_path": ""
+    },
+    {
+      "id": "en_US-arctic-medium",
+      "name": "Arctic (English)",
+      "provider": "piper",
+      "provider_voice": "models/piper-en/en_US-arctic-medium.onnx",
+      "language": "en",
+      "gender": "male",
+      "tier": "free",
+      "enabled": true,
+      "tags": [
+        "local",
+        "piper"
+      ],
+      "preview_audio_url": "",
+      "preview_audio_path": "",
+      "preview_video_url": "",
+      "preview_video_path": ""
+    }
+  ]
+}
