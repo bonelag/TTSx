@@ -1,7 +1,9 @@
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -981,7 +983,7 @@ class TTSMainWindow(QMainWindow):
             self.txt_input.setPlainText(norm_text)
 
     def _get_output_dir(self) -> Path:
-        out_dir = Path(__file__).resolve().parent / "output"
+        out_dir = Path(app_path("output"))
         out_dir.mkdir(parents=True, exist_ok=True)
         return out_dir
 
@@ -1019,9 +1021,15 @@ class TTSMainWindow(QMainWindow):
         fmt = "wav" if self.cmb_format.currentIndex() == 0 else "mp3"
         piper_opts = self._get_piper_options()
 
-        # Prepare output path
+        # Prepare output path: {model_id}_{id}.{fmt}
         out_dir = self._get_output_dir()
-        file_name = f"tts_output_{QTime.currentTime().toString('hhmmss')}.{fmt}"
+        clean_model_id = re.sub(r'[^\w\-\.]', '_', str(voice_id))
+        time_id = QTime.currentTime().toString("hhmmss")
+        file_name = f"{clean_model_id}_{time_id}.{fmt}"
+        counter = 1
+        while (out_dir / file_name).exists():
+            file_name = f"{clean_model_id}_{time_id}_{counter}.{fmt}"
+            counter += 1
         target_path = str(out_dir / file_name)
 
         # UI state

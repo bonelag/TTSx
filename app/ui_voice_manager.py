@@ -57,21 +57,45 @@ class VoiceModelItem:
     repo_source: str = ""
 
 
-def parse_huggingface_repo_id(url_or_repo: str) -> str:
-    """Extract 'owner/repo' from a Hugging Face URL or identifier string."""
-    clean = url_or_repo.strip()
+def parse_huggingface_repo_id(url_or_repo: str) -> Tuple[str, str]:
+    """Extract (repo_type, repo_id) from a Hugging Face URL or identifier string.
+    
+    Supports:
+      - Models: 'owner/repo' or 'https://huggingface.co/owner/repo'
+      - Buckets: 'https://huggingface.co/buckets/owner/repo' or 'buckets/owner/repo'
+      - Datasets: 'https://huggingface.co/datasets/owner/repo' or 'datasets/owner/repo'
+    """
+    clean = url_or_repo.strip().rstrip("/")
     if not clean:
-        return "rhasspy/piper-voices"
+        return "rhasspy", "rhasspy/piper-voices"
 
-    # Match https://huggingface.co/owner/repo/... or owner/repo
-    m = re.search(r"huggingface\.co/([^/]+/[^/]+)", clean)
-    if m:
-        return m.group(1)
+    # Match /buckets/owner/repo
+    m_bucket = re.search(r"huggingface\.co/buckets/([^/]+/[^/]+)", clean) or re.match(r"^buckets/([^/]+/[^/]+)", clean)
+    if m_bucket:
+        return "bucket", m_bucket.group(1)
+
+    # Match /datasets/owner/repo
+    m_dataset = re.search(r"huggingface\.co/datasets/([^/]+/[^/]+)", clean) or re.match(r"^datasets/([^/]+/[^/]+)", clean)
+    if m_dataset:
+        return "dataset", m_dataset.group(1)
+
+    # Match standard huggingface.co/owner/repo
+    m_model = re.search(r"huggingface\.co/([^/]+/[^/]+)", clean)
+    if m_model:
+        rid = m_model.group(1)
+        if rid.startswith("buckets/"):
+            return "bucket", rid[len("buckets/"):]
+        if rid.startswith("datasets/"):
+            return "dataset", rid[len("datasets/"):]
+        return "auto", rid
 
     parts = clean.split("/")
-    if len(parts) >= 2:
-        return f"{parts[0]}/{parts[1]}"
-    return clean
+    if len(parts) == 2:
+        return "auto", clean
+    elif len(parts) >= 3 and parts[0] in ("buckets", "datasets"):
+        return parts[0][:-1] if parts[0].endswith("s") else parts[0], f"{parts[1]}/{parts[2]}"
+
+    return "auto", clean
 
 
 def format_size(bytes_val: int) -> str:
@@ -94,14 +118,14 @@ class VoiceScanWorker(QThread):
 
     def run(self):
         try:
-            repo_id = parse_huggingface_repo_id(self.repo_input)
+            repo_type, repo_id = parse_huggingface_repo_id(self.repo_input)
             self.progress_signal.emit(f"Đang kết nối tới Hugging Face ({repo_id})...")
 
             items: List[VoiceModelItem] = []
             if "rhasspy/piper-voices" in repo_id.lower():
                 items = self._fetch_rhasspy_voices(repo_id)
             else:
-                items = self._fetch_custom_hf_repo(repo_id)
+                items = self._fetch_custom_hf_repo(repo_id, repo_type=repo_type)
 
             self.finished_signal.emit(items)
         except Exception as e:
@@ -146,11 +170,10 @@ class VoiceScanWorker(QThread):
             onnx_url = f"https://huggingface.co/{repo_id}/resolve/main/{onnx_rel}"
             json_url = f"https://huggingface.co/{repo_id}/resolve/main/{json_rel}" if json_rel else f"{onnx_url}.json"
 
-            model_filename = Path(onnx_rel).name
-            json_filename = Path(json_rel).name if json_rel else f"{model_filename}.json"
+            model_filename = os.path.basename(onnx_rel)
+            json_filename = f"{model_filename}.json"
 
-            # Check local existence
-            target_dir = local_piper_dir if lang_code.startswith("vi") else (local_piper_en_dir if lang_code.startswith("en") else local_piper_dir)
+            target_dir = local_piper_en_dir if lang_code.startswith("en") else local_piper_dir
             local_onnx = target_dir / model_filename
             local_json = target_dir / json_filename
             is_downloaded = local_onnx.exists() and local_onnx.stat().st_size > 1024
@@ -176,12 +199,37 @@ class VoiceScanWorker(QThread):
 
         return results
 
-    def _fetch_custom_hf_repo(self, repo_id: str) -> List[VoiceModelItem]:
+    def _fetch_custom_hf_repo(self, repo_id: str, repo_type: str = "auto") -> List[VoiceModelItem]:
         self.progress_signal.emit(f"Đang quét cây thư mục repository {repo_id}...")
-        api_url = f"https://huggingface.co/api/models/{repo_id}/tree/main?recursive=true"
-        req = urllib.request.Request(api_url, headers={"User-Agent": "TTSx-Studio/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            tree = json.loads(resp.read().decode("utf-8"))
+        
+        endpoints = []
+        if repo_type == "bucket":
+            endpoints.append(("bucket", f"https://huggingface.co/api/buckets/{repo_id}/tree?recursive=true"))
+        elif repo_type == "dataset":
+            endpoints.append(("dataset", f"https://huggingface.co/api/datasets/{repo_id}/tree/main?recursive=true"))
+        elif repo_type == "model":
+            endpoints.append(("model", f"https://huggingface.co/api/models/{repo_id}/tree/main?recursive=true"))
+        else:
+            endpoints.append(("model", f"https://huggingface.co/api/models/{repo_id}/tree/main?recursive=true"))
+            endpoints.append(("bucket", f"https://huggingface.co/api/buckets/{repo_id}/tree?recursive=true"))
+            endpoints.append(("dataset", f"https://huggingface.co/api/datasets/{repo_id}/tree/main?recursive=true"))
+
+        tree = None
+        resolved_type = "model"
+        last_err = None
+
+        for r_type, api_url in endpoints:
+            try:
+                req = urllib.request.Request(api_url, headers={"User-Agent": "TTSx-Studio/1.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    tree = json.loads(resp.read().decode("utf-8"))
+                    resolved_type = r_type
+                    break
+            except Exception as e:
+                last_err = e
+
+        if tree is None:
+            raise Exception(f"Không thể quét repository ({repo_id}): {last_err}")
 
         local_piper_dir = Path(models_path("piper"))
         onnx_entries: Dict[str, dict] = {}
@@ -213,8 +261,12 @@ class VoiceScanWorker(QThread):
 
             has_json = json_candidate in json_entries
 
-            onnx_url = f"https://huggingface.co/{repo_id}/resolve/main/{onnx_path}"
-            json_url = f"https://huggingface.co/{repo_id}/resolve/main/{json_candidate}" if has_json else f"{onnx_url}.json"
+            if resolved_type == "bucket":
+                onnx_url = f"https://huggingface.co/buckets/{repo_id}/resolve/{onnx_path}?download=true"
+                json_url = f"https://huggingface.co/buckets/{repo_id}/resolve/{json_candidate}?download=true" if has_json else ""
+            else:
+                onnx_url = f"https://huggingface.co/{repo_id}/resolve/main/{onnx_path}"
+                json_url = f"https://huggingface.co/{repo_id}/resolve/main/{json_candidate}" if has_json else f"{onnx_url}.json"
 
             # Determine language only if explicit in path or repository context
             lang_code = ""
@@ -235,16 +287,20 @@ class VoiceScanWorker(QThread):
                     "ru": "Русский",
                 }
                 lang_name = lang_names_map.get(raw_code, raw_code.upper())
-            elif "viet" in repo_id.lower() or "nghit" in repo_id.lower() or "mailinh" in repo_id.lower():
+            elif any(k in repo_id.lower() for k in ("vtranslate", "bonelag", "viet", "nghit", "mailinh")):
                 lang_code = "vi"
                 lang_name = "Tiếng Việt"
 
-            # Determine gender only if explicit in filename
+            # Determine gender only if explicit in filename or recognized name
             gender = ""
             stem_lower = stem_name.lower()
-            if re.search(r"(?:^|[_/\-])(female|woman)(?:[_/\-]|\d|$)", stem_lower):
+            if re.search(r"(?:^|[_/\-])(female|woman)(?:[_/\-]|\d|$)", stem_lower) or any(
+                stem_lower.startswith(fn) for fn in ("hoaimy", "ngochuyen", "ngocngan", "maiphuong", "hongtuyen", "huyenngoc", "leyen", "banmai", "cuc")
+            ):
                 gender = "female"
-            elif re.search(r"(?:^|[_/\-])(male|man)(?:[_/\-]|\d|$)", stem_lower):
+            elif re.search(r"(?:^|[_/\-])(male|man)(?:[_/\-]|\d|$)", stem_lower) or any(
+                stem_lower.startswith(mn) for mn in ("namminh", "namtutin", "dungdien", "duyoryx", "minhquang", "lacphi", "doanhdoanh", "chieuthanh")
+            ):
                 gender = "male"
 
             quality = "44.1kHz" if "44k" in stem_lower else ("High" if "high" in stem_lower else ("Medium" if "medium" in stem_lower else ("Low" if "low" in stem_lower else "")))
@@ -433,13 +489,18 @@ class VoiceManagerDialog(QDialog):
 
         # Quick preset buttons
         preset_row = QHBoxLayout()
-        preset_row.addWidget(QLabel("Gợi ý nhanh:"))
+        preset_row.addWidget(QLabel("Kho giọng:"))
         
+        btn_vtranslate = QPushButton("⚡ vTranslate (VI - 21 giọng)")
+        btn_vtranslate.setStyleSheet("font-weight: bold; color: #80D8FF;")
+        btn_vtranslate.clicked.connect(lambda: self._start_scan("https://huggingface.co/buckets/bonelag/vTranslate"))
+        preset_row.addWidget(btn_vtranslate)
+
         btn_rhasspy = QPushButton("🌟 Rhasspy Piper (Gốc - 170+ giọng)")
         btn_rhasspy.clicked.connect(lambda: self._start_scan("https://huggingface.co/rhasspy/piper-voices/tree/main"))
         preset_row.addWidget(btn_rhasspy)
 
-        btn_nghia = QPushButton("🇻🇳 NghiaTTS Copy (Đa giọng Việt)")
+        btn_nghia = QPushButton("🇻🇳 NghiTTS (VI - 50 giọng)")
         btn_nghia.clicked.connect(lambda: self._start_scan("https://huggingface.co/doof-ferb/nghitts-copy"))
         preset_row.addWidget(btn_nghia)
 
