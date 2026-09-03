@@ -142,6 +142,53 @@ def _speed_to_float(speed) -> float:
         return 1.0
 
 
+# ---------------------------------------------------------------------------
+# TTSx phonemizer tiếng Việt — Python thuần (app/ttsx_phonemizer.py)
+# ---------------------------------------------------------------------------
+
+_TTSX_PHONEMIZER_AVAILABLE: Optional[bool] = None
+
+
+def _ttsx_phonemize_available() -> bool:
+    """Kiểm tra module ttsx_phonemizer + espeakng-loader dùng được không (cache)."""
+    global _TTSX_PHONEMIZER_AVAILABLE
+    if _TTSX_PHONEMIZER_AVAILABLE is not None:
+        return _TTSX_PHONEMIZER_AVAILABLE
+    try:
+        from .ttsx_phonemizer import ttsx_phonemize  # noqa: F401
+        import espeakng_loader  # noqa: F401
+
+        _TTSX_PHONEMIZER_AVAILABLE = True
+    except Exception:
+        _TTSX_PHONEMIZER_AVAILABLE = False
+    return _TTSX_PHONEMIZER_AVAILABLE
+
+
+def _ttsx_phonemize_pipeline(text: str) -> Optional[list]:
+    """Chạy pipeline text TTSx (chuẩn hóa + tách câu + phonemize espeak-ng IPA).
+    Trả về list chuỗi phoneme (mỗi câu 1 phần tử), hoặc None nếu lỗi
+    (caller fallback về pipeline piper espeak).
+    """
+    if not _ttsx_phonemize_available():
+        return None
+    try:
+        from .ttsx_phonemizer import ttsx_phonemize
+
+        phonemes = ttsx_phonemize(text)
+        if phonemes:
+            return phonemes
+    except Exception:
+        pass
+    return None
+
+
+def _ttsx_ids_from_phonemes(voice, phoneme_str: str) -> list:
+    """Phoneme string -> ID sequence (BOS, PAD + phoneme+PAD*, EOS)."""
+    from .ttsx_phonemizer import phonemes_to_ids
+
+    return phonemes_to_ids(phoneme_str, voice.config.phoneme_id_map)
+
+
 def _optimize_punctuation_and_capitalization(text: str) -> str:
     """Optimize punctuation rhythm and capitalize sentence beginnings to ensure Piper espeak-ng recognizes sentence boundaries."""
     if not text:
@@ -313,7 +360,7 @@ def piper_tts_to_wav(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     temp_wav = str(out_path.with_name(f"{out_path.stem}_raw{out_path.suffix}"))
 
-    speed_val = max(0.5, min(2.0, _speed_to_float(speed)))
+    speed_val = max(0.5, min(3.0, _speed_to_float(speed)))
     opts = piper_options or {}
 
     length_scale_opt = opts.get("length_scale")
@@ -324,10 +371,14 @@ def piper_tts_to_wav(
 
     noise_scale_opt = opts.get("noise_scale")
     noise_w_opt = opts.get("noise_w_scale")
-    normalize_audio = opts.get("normalize_audio", True)
+    # Chuẩn hóa biên độ: KHÔNG đẩy peak từng câu lên 1.0
+    # (normalize_audio của piper amplify +4~5dB làm giọng chói);
+    # thay vào đó chỉ attenuate nếu đỉnh vượt ngưỡng, giữ nguyên dynamics gốc.
+    normalize_audio = opts.get("normalize_audio", False)
+    peak_ceiling = float(opts.get("peak_ceiling", 0.99) or 0.99)
     volume_opt = float(opts.get("volume", 1.0) or 1.0)
     speaker_id_opt = opts.get("speaker_id")
-    silence_sec = float(opts.get("sentence_silence", 0.25) or 0.0)
+    silence_sec = float(opts.get("sentence_silence", 0.0) or 0.0)
 
     syn_config = SynthesisConfig(
         speaker_id=speaker_id_opt,
@@ -338,23 +389,74 @@ def piper_tts_to_wav(
         volume=volume_opt,
     )
 
-    with wave.open(temp_wav, "wb") as wav_file:
-        first_chunk = True
-        for audio_chunk in voice.synthesize(norm_text, syn_config=syn_config):
-            if first_chunk:
-                wav_file.setframerate(audio_chunk.sample_rate)
-                wav_file.setsampwidth(audio_chunk.sample_width)
-                wav_file.setnchannels(audio_chunk.sample_channels)
-                first_chunk = False
-            else:
-                if silence_sec > 0:
-                    silence_frames = int(audio_chunk.sample_rate * silence_sec)
-                    wav_file.writeframes(b"\x00" * (silence_frames * audio_chunk.sample_width * audio_chunk.sample_channels))
-            wav_file.writeframes(audio_chunk.audio_int16_bytes)
+    # Ghép audio từng câu; áp peak ceiling (chỉ attenuate, không amplify)
+    import numpy as np
 
-        if not first_chunk and silence_sec > 0:
-            tail_silence = int(audio_chunk.sample_rate * min(0.08, silence_sec))
-            wav_file.writeframes(b"\x00" * (tail_silence * audio_chunk.sample_width * audio_chunk.sample_channels))
+    audio_chunks: list = []
+    sample_rate = 22050
+    sample_width = 2
+    sample_channels = 1
+
+    # Đường phonemize TTSx (espeak-ng IPA + tone digit 1-7) cho tiếng Việt
+    use_ttsx_phon = (
+        bool(opts.get("use_ttsx_phonemizer", True))
+        and str(language or "").lower().startswith("vi")
+        and _ttsx_phonemize_available()
+    )
+    ttsx_sentences = None
+    if use_ttsx_phon:
+        if on_progress:
+            on_progress("Đang xử lý văn bản + phonemize tiếng Việt...")
+        # Toàn bộ text pipeline TTSx (số->chữ, lowercase, từ viết tắt, phiên âm,
+        # tách câu, phonemize espeak-ng IPA + tone digit)
+        ttsx_sentences = _ttsx_phonemize_pipeline(text)
+
+    if ttsx_sentences:
+        for phoneme_str in ttsx_sentences:
+            if not phoneme_str:
+                continue
+            ids = _ttsx_ids_from_phonemes(voice, phoneme_str)
+            audio = np.asarray(
+                voice.phoneme_ids_to_audio(ids, syn_config), dtype=np.float32
+            )
+            audio_chunks.append(audio)
+            if silence_sec > 0:
+                audio_chunks.append(
+                    np.zeros(int(sample_rate * silence_sec), dtype=np.float32)
+                )
+        sample_rate = voice.config.sample_rate
+    else:
+        for audio_chunk in voice.synthesize(norm_text, syn_config=syn_config):
+            sample_rate = audio_chunk.sample_rate
+            sample_width = audio_chunk.sample_width
+            sample_channels = audio_chunk.sample_channels
+            audio_chunks.append(
+                np.frombuffer(audio_chunk.audio_int16_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            )
+            if silence_sec > 0:
+                silence_frames = int(audio_chunk.sample_rate * silence_sec)
+                audio_chunks.append(
+                    np.zeros(silence_frames * audio_chunk.sample_channels, dtype=np.float32)
+                )
+
+    if not audio_chunks:
+        raise RuntimeError("Piper không sinh được dữ liệu âm thanh.")
+
+    merged_audio = np.concatenate(audio_chunks) if len(audio_chunks) > 1 else audio_chunks[0]
+
+    # Peak ceiling (soft-limit): chỉ hạ nếu vượt ngưỡng — giữ nguyên loudness gốc của model
+    peak_val = float(np.max(np.abs(merged_audio))) if merged_audio.size else 0.0
+    if peak_val > peak_ceiling and peak_val > 1e-8:
+        merged_audio = merged_audio * (peak_ceiling / peak_val)
+
+    pcm16 = np.clip(merged_audio, -1.0, 1.0)
+    pcm16 = (pcm16 * 32767.0).astype(np.int16)
+
+    with wave.open(temp_wav, "wb") as wav_file:
+        wav_file.setframerate(sample_rate)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setnchannels(sample_channels)
+        wav_file.writeframes(pcm16.tobytes())
 
     _validate_generated_wav(temp_wav)
 

@@ -7,9 +7,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, QTime, QUrl, Qt, Signal
+from PySide6.QtCore import QIODevice, QObject, QThread, QTime, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPalette
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -54,6 +54,257 @@ class NoScrollSpinBox(QSpinBox):
     """SpinBox ignoring wheelEvent to prevent value changes during mouse scroll."""
     def wheelEvent(self, event):
         event.ignore()
+
+
+class _PcmStream(QIODevice):
+    """Nguồn PCM (pull mode) cho QAudioSink."""
+
+    def __init__(self, pcm: bytes, parent=None):
+        super().__init__(parent)
+        self._pcm = pcm
+        self._pos = 0
+        self.open(QIODevice.ReadOnly)
+
+    def reset_stream(self, byte_pos: int = 0):
+        self._pos = max(0, min(byte_pos, len(self._pcm)))
+
+    def pos_bytes(self) -> int:
+        return self._pos
+
+    def readData(self, maxlen: int):
+        chunk = self._pcm[self._pos : self._pos + maxlen]
+        self._pos += len(chunk)
+        return bytes(chunk)
+
+    def writeData(self, data):
+        return 0
+
+    def atEnd(self) -> bool:
+        return self._pos >= len(self._pcm)
+
+    def bytesAvailable(self) -> int:
+        return max(0, len(self._pcm) - self._pos) + super().bytesAvailable()
+
+
+class PcmPlayer(QObject):
+    """Trình phát audio trực tiếp qua QAudioSink (WASAPI).
+
+    Thay cho QMediaPlayer: backend FFmpeg của Qt trên Windows resample
+    audio 22kHz kém chất lượng gây chói tai (aliasing); QAudioSink đẩy
+    PCM thẳng ra thiết bị âm thanh, hệ điều hành tự resample sạch.
+    """
+
+    positionChanged = Signal(int)   # ms
+    durationChanged = Signal(int)   # ms
+    playingChanged = Signal(bool)
+    finished = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._sink: Optional[QAudioSink] = None
+        self._stream: Optional[_PcmStream] = None
+        self._pcm = b""
+        self._fmt = QAudioFormat()
+        self._rate = 22050
+        self._channels = 1
+        self._width = 2
+        self._duration_ms = 0
+        self._base_ms = 0  # vị trí bắt đầu khi seek
+        self._volume = 0.9
+        self._playing = False
+        self._finished = False
+        # Timer cập nhật vị trí phát (thay notify của QAudioSink)
+        from PySide6.QtCore import QTimer
+
+        self._pos_timer = QTimer(self)
+        self._pos_timer.setInterval(80)
+        self._pos_timer.timeout.connect(self._on_pos_timer)
+
+    # ── Public API ────────────────────────────────────────────────────────
+    def is_playing(self) -> bool:
+        return self._playing
+
+    def duration(self) -> int:
+        return self._duration_ms
+
+    def position(self) -> int:
+        if self._sink and self._playing:
+            return min(self._base_ms + int(self._sink.processedUSecs() // 1000), self._duration_ms)
+        return self._base_ms
+
+    def set_volume(self, vol: float):
+        self._volume = max(0.0, min(1.0, vol))
+        if self._sink:
+            self._sink.setVolume(self._volume)
+
+    def load(self, path: str):
+        self.stop()
+        ok = self._read_audio(path)
+        if not ok:
+            self._pcm = b""
+            self._duration_ms = 0
+        self.durationChanged.emit(self._duration_ms)
+        self.positionChanged.emit(0)
+
+    def play(self):
+        if not self._pcm or not self._fmt.isValid():
+            return
+        if self._sink and self._sink.state() == QAudio.SuspendedState:
+            self._sink.resume()
+            self._set_playing(True)
+            return
+        if self._finished:
+            self._base_ms = 0
+        self._start(self._base_ms)
+
+    def pause(self):
+        if self._sink and self._playing:
+            # Snapshot vị trí: processedUSecs bị reset sau suspend/resume
+            self._base_ms = self.position()
+            self._sink.suspend()
+            self._set_playing(False)
+
+    def stop(self):
+        self._close_sink()
+        self._base_ms = 0
+        self._finished = False
+        self._set_playing(False)
+        self.positionChanged.emit(0)
+
+    def seek(self, ms: int):
+        ms = max(0, min(ms, self._duration_ms))
+        if self._playing:
+            self._start(ms)
+        else:
+            self._base_ms = ms
+            self._finished = False
+            self.positionChanged.emit(ms)
+
+    # ── Nội bộ ────────────────────────────────────────────────────────────
+    def _set_playing(self, playing: bool):
+        if self._playing != playing:
+            self._playing = playing
+            self.playingChanged.emit(playing)
+        if playing:
+            self._pos_timer.start()
+        else:
+            self._pos_timer.stop()
+
+    def _on_pos_timer(self):
+        if self._playing:
+            self.positionChanged.emit(self.position())
+
+    def _start(self, from_ms: int):
+        self._close_sink()
+        self._base_ms = from_ms
+        self._finished = False
+        self._stream = _PcmStream(self._pcm, self)
+        self._stream.reset_stream(int(from_ms / 1000.0 * self._rate * self._channels * self._width))
+        self._sink = QAudioSink(QMediaDevices.defaultAudioOutput(), self._fmt)
+        self._sink.setVolume(self._volume)
+        self._sink.stateChanged.connect(self._on_sink_state)
+        self._sink.start(self._stream)
+        self._set_playing(True)
+
+    def _close_sink(self):
+        if self._sink is not None:
+            try:
+                self._sink.stateChanged.disconnect(self._on_sink_state)
+            except Exception:
+                pass
+            try:
+                self._sink.stop()
+            except Exception:
+                pass
+            self._sink = None
+        self._stream = None
+
+    def _on_sink_state(self, state):
+        # IdleState + hết data = phát xong (StalledState không xử lý)
+        if (
+            state == QAudio.IdleState
+            and self._stream is not None
+            and self._stream.atEnd()
+        ):
+            self._set_playing(False)
+            self._finished = True
+            self._base_ms = self._duration_ms
+            self.positionChanged.emit(self._duration_ms)
+            self.finished.emit()
+
+    def _read_audio(self, path: str) -> bool:
+        """Đọc file audio, LUÔN resample về format native của thiết bị phát bằng FFmpeg (soxr).
+
+        Audio 22kHz mono từ Piper nếu đưa thẳng vào QAudioSink sẽ bị Qt/WASAPI tự resample
+        bằng bộ lọc kém chất lượng gây chói tai (aliasing). Resample sẵn về đúng format
+        thiết bị (thường 48kHz stereo) bằng soxr — chất lượng cao như trình duyệt —
+        thì sink phát passthrough, không còn bước chuyển đổi nào.
+        """
+        import wave as _wave
+
+        from .tts_processor import _ffmpeg_path
+        from .runtime_paths import temp_path
+
+        temp_wav = temp_path("_player_48k.wav")
+        try:
+            device = QMediaDevices.defaultAudioOutput()
+            pref = device.preferredFormat()
+            target_rate = pref.sampleRate() if pref.sampleRate() else 48000
+            target_ch = pref.channelCount() if pref.channelCount() else 2
+
+            # Resample soxr chất lượng cao về đúng rate/kênh của thiết bị, xuất WAV 16-bit
+            cmd = [
+                _ffmpeg_path(),
+                "-y",
+                "-i",
+                path,
+                "-vn",
+                "-af",
+                f"aresample={target_rate}:resampler=soxr:precision=28",
+                "-ac",
+                str(target_ch),
+                "-acodec",
+                "pcm_s16le",
+                temp_wav,
+            ]
+            proc = subprocess.run(cmd, capture_output=True)
+            if proc.returncode != 0 or not os.path.exists(temp_wav):
+                # Fallback: không soxr, dùng swresample mặc định
+                cmd[6] = f"aresample={target_rate}"
+                proc = subprocess.run(cmd, capture_output=True)
+                if proc.returncode != 0 or not os.path.exists(temp_wav):
+                    return False
+
+            with _wave.open(temp_wav, "rb") as wf:
+                width = wf.getsampwidth()
+                if width not in (1, 2, 4):
+                    return False
+                self._pcm = wf.readframes(wf.getnframes())
+                self._rate = wf.getframerate() or target_rate
+                self._channels = wf.getnchannels() or target_ch
+                self._width = width
+
+            self._fmt = QAudioFormat()
+            self._fmt.setSampleRate(self._rate)
+            self._fmt.setChannelCount(self._channels)
+            fmt_map = {1: QAudioFormat.UInt8, 2: QAudioFormat.Int16, 4: QAudioFormat.Int32}
+            self._fmt.setSampleFormat(fmt_map[self._width])
+            if not self._fmt.isValid():
+                return False
+
+            bytes_per_ms = self._rate * self._channels * self._width / 1000.0
+            self._duration_ms = int(len(self._pcm) / bytes_per_ms) if bytes_per_ms else 0
+            self._base_ms = 0
+            self._finished = False
+            return True
+        except Exception:
+            return False
+        finally:
+            if os.path.exists(temp_wav):
+                try:
+                    os.remove(temp_wav)
+                except OSError:
+                    pass
 
 
 class SynthesisWorker(QThread):
@@ -123,15 +374,13 @@ class TTSMainWindow(QMainWindow):
         self.current_audio_path: Optional[str] = None
         self.worker: Optional[SynthesisWorker] = None
 
-        # Setup Audio Player
-        self.media_player = QMediaPlayer(self)
-        self.audio_output = QAudioOutput(self)
-        self.media_player.setAudioOutput(self.audio_output)
-        self.audio_output.setVolume(0.9)
+        # Setup Audio Player — QAudioSink trực tiếp (né resample chói của QMediaPlayer/FFmpeg)
+        self.player = PcmPlayer(self)
+        self.player.set_volume(0.9)
 
-        self.media_player.positionChanged.connect(self._on_player_position_changed)
-        self.media_player.durationChanged.connect(self._on_player_duration_changed)
-        self.media_player.playbackStateChanged.connect(self._on_player_state_changed)
+        self.player.positionChanged.connect(self._on_player_position_changed)
+        self.player.durationChanged.connect(self._on_player_duration_changed)
+        self.player.playingChanged.connect(self._on_player_state_changed)
 
         self._setup_ui()
         self._apply_dark_theme()
@@ -273,9 +522,10 @@ class TTSMainWindow(QMainWindow):
         speed_layout.addWidget(self.lbl_speed_val)
 
         self.slider_speed = NoScrollSlider(Qt.Horizontal)
-        self.slider_speed.setRange(50, 200)
+        self.slider_speed.setRange(50, 300)
         self.slider_speed.setValue(100)
         self.slider_speed.setSingleStep(5)
+        self.slider_speed.setToolTip("Tốc độ đọc 0.5x - 3.0x. Với Piper, trên 2.0x giọng có thể méo do mô hình không được huấn luyện ở mức giãn âm quá thấp.")
         self.slider_speed.valueChanged.connect(self._on_speed_changed)
         speed_layout.addWidget(self.slider_speed)
 
@@ -369,7 +619,16 @@ class TTSMainWindow(QMainWindow):
 
         btn_style = "QPushButton { padding: 4px 10px; font-size: 12px; border-radius: 4px; } QPushButton:hover { background-color: #0288D1; }"
 
-        self.btn_preset_warm = QPushButton("☕ Ấm && Mượt")
+        self.btn_preset_natural = QPushButton("🌿 Tự nhiên")
+        self.btn_preset_natural.setStyleSheet(btn_style)
+        self.btn_preset_natural.setToolTip(
+            "Chất âm gốc tự nhiên của TTSx: không normalize biên độ (giữ loudness tự nhiên ~-18dB, không chói), "
+            "không chèn khoảng lặng giữa câu, dùng tham số gốc của model (noise 0.667/0.8)."
+        )
+        self.btn_preset_natural.clicked.connect(self._apply_preset_natural)
+        presets_layout.addWidget(self.btn_preset_natural)
+
+        self.btn_preset_warm = QPushButton("☕ Ấm")
         self.btn_preset_warm.setStyleSheet(btn_style)
         self.btn_preset_warm.setToolTip("Tối ưu cho giọng nữ cao/the thé (như Ngọc Huyền): noise_scale=0.33, noise_w=0.50, length_scale=1.08 để giọng ấm, đầm và giảm chói tai")
         self.btn_preset_warm.clicked.connect(self._apply_preset_warm)
@@ -424,9 +683,9 @@ class TTSMainWindow(QMainWindow):
         self.lbl_length_scale_val.setStyleSheet("font-weight: bold; color: #4FC3F7; min-width: 38px;")
         length_layout.addWidget(self.lbl_length_scale_val)
         self.slider_length_scale = NoScrollSlider(Qt.Horizontal)
-        self.slider_length_scale.setRange(50, 200)
+        self.slider_length_scale.setRange(33, 200)
         self.slider_length_scale.setValue(100)
-        self.slider_length_scale.setToolTip("Độ giãn thời lượng âm vị. 1.0 = tự động theo tốc độ chính.")
+        self.slider_length_scale.setToolTip("Độ giãn thời lượng âm vị. 1.0 = tự động theo tốc độ chính. 0.33 tương đương 3.0x.")
         self.slider_length_scale.valueChanged.connect(self._on_length_scale_changed)
         length_layout.addWidget(self.slider_length_scale)
         adv_layout.addLayout(length_layout)
@@ -439,8 +698,8 @@ class TTSMainWindow(QMainWindow):
         silence_layout.addWidget(self.lbl_silence_val)
         self.slider_silence = NoScrollSlider(Qt.Horizontal)
         self.slider_silence.setRange(0, 100)
-        self.slider_silence.setValue(25)
-        self.slider_silence.setToolTip("Khoảng lặng đệm giữa các câu hoặc cuối audio để chống cụt âm.")
+        self.slider_silence.setValue(0)
+        self.slider_silence.setToolTip("Khoảng lặng đệm giữa các câu. Mặc định 0 (liền mạch); tăng nếu muốn tách câu rõ hơn.")
         self.slider_silence.valueChanged.connect(self._on_silence_changed)
         silence_layout.addWidget(self.slider_silence)
         adv_layout.addLayout(silence_layout)
@@ -448,12 +707,16 @@ class TTSMainWindow(QMainWindow):
         # 5. Checkboxes Row
         chk_layout = QHBoxLayout()
         chk_layout.setSpacing(8)
-        self.chk_normalize = QCheckBox("Chuẩn hóa")
-        self.chk_normalize.setChecked(True)
-        self.chk_normalize.setToolTip("Chuẩn hóa biên độ âm lượng đỉnh để chống vỡ tiếng.")
+        self.chk_normalize = QCheckBox("Tăng âm")
+        self.chk_normalize.setChecked(False)
+        self.chk_normalize.setToolTip(
+            "Đẩy biên độ đỉnh của TỪNG CÂU lên 1.0 (to hơn ~4dB).\n"
+            "CẢNH BÁO: làm giọng chói và dynamics nén.\n"
+            "Bỏ tick để giữ loudness tự nhiên của model (khuyên dùng)."
+        )
         chk_layout.addWidget(self.chk_normalize)
 
-        self.chk_warm_dsp = QCheckBox("🎧 Khử chói && Tăng ấm (DSP)")
+        self.chk_warm_dsp = QCheckBox("🎧 Khử chói")
         self.chk_warm_dsp.setChecked(False)
         self.chk_warm_dsp.setToolTip("Áp dụng bộ lọc Studio Warm: tăng dải trầm 210Hz, triệt tiêu gai chói 3.4kHz & 6.2kHz, loại bỏ tiếng the thé kim loại.")
         chk_layout.addWidget(self.chk_warm_dsp)
@@ -463,6 +726,15 @@ class TTSMainWindow(QMainWindow):
         self.chk_custom_dsp.setToolTip("Bật ô nhập để dán chuỗi filter -af FFmpeg tùy biến (như Deep Warm, Tube Warmth,...).")
         self.chk_custom_dsp.toggled.connect(self._toggle_custom_dsp)
         chk_layout.addWidget(self.chk_custom_dsp)
+
+        self.chk_ttsx_phon = QCheckBox("🗣️ Phoneme TTSx")
+        self.chk_ttsx_phon.setChecked(True)
+        self.chk_ttsx_phon.setToolTip(
+            "Phonemizer tiếng Việt riêng của TTSx (espeak-ng IPA + tone digit 1-7 đầy đủ).\n"
+            "Cho chất âm tự nhiên nhất với các giọng Việt (ngochuyennew, nhx,...).\n"
+            "Cần thư viện espeakng-loader; nếu thiếu sẽ tự dùng espeak của Piper."
+        )
+        chk_layout.addWidget(self.chk_ttsx_phon)
 
         chk_layout.addStretch()
         adv_layout.addLayout(chk_layout)
@@ -569,6 +841,12 @@ class TTSMainWindow(QMainWindow):
         self.slider_volume.setMaximumWidth(90)
         self.slider_volume.valueChanged.connect(self._on_volume_changed)
         controls_layout.addWidget(self.slider_volume)
+
+        self.btn_ext_play = QPushButton("🪟 Nghe ngoài")
+        self.btn_ext_play.setEnabled(False)
+        self.btn_ext_play.setToolTip("Phát file bằng trình phát mặc định của hệ thống (Media Player) — dùng để so sánh chất âm với trình phát trong app")
+        self.btn_ext_play.clicked.connect(self._play_external)
+        controls_layout.addWidget(self.btn_ext_play)
 
         grp_player_layout.addLayout(controls_layout)
 
@@ -895,6 +1173,16 @@ class TTSMainWindow(QMainWindow):
     def _on_silence_changed(self, val):
         self.lbl_silence_val.setText(f"{val / 100.0:.2f}s")
 
+    def _apply_preset_natural(self):
+        self.slider_noise_scale.setValue(67)
+        self.slider_noise_w.setValue(80)
+        self.slider_length_scale.setValue(100)
+        self.slider_silence.setValue(0)
+        self.chk_normalize.setChecked(False)
+        self.chk_ttsx_phon.setChecked(True)
+        self.chk_warm_dsp.setChecked(False)
+        self.chk_custom_dsp.setChecked(False)
+
     def _apply_preset_warm(self):
         self.slider_noise_scale.setValue(33)
         self.slider_noise_w.setValue(50)
@@ -917,8 +1205,8 @@ class TTSMainWindow(QMainWindow):
         self.slider_noise_scale.setValue(67)
         self.slider_noise_w.setValue(80)
         self.slider_length_scale.setValue(100)
-        self.slider_silence.setValue(25)
-        self.chk_normalize.setChecked(True)
+        self.slider_silence.setValue(0)
+        self.chk_normalize.setChecked(False)
         self.chk_warm_dsp.setChecked(False)
         self.chk_custom_dsp.setChecked(False)
         self.spin_speaker_id.setValue(0)
@@ -930,6 +1218,7 @@ class TTSMainWindow(QMainWindow):
             "length_scale": (self.slider_length_scale.value() / 100.0) if self.slider_length_scale.value() != 100 else None,
             "sentence_silence": self.slider_silence.value() / 100.0,
             "normalize_audio": self.chk_normalize.isChecked(),
+            "use_ttsx_phonemizer": self.chk_ttsx_phon.isChecked(),
             "warm_dsp": self.chk_warm_dsp.isChecked(),
             "use_custom_dsp": self.chk_custom_dsp.isChecked(),
             "custom_dsp": self.txt_custom_dsp.text().strip() if self.chk_custom_dsp.isChecked() else "",
@@ -1072,13 +1361,14 @@ class TTSMainWindow(QMainWindow):
 
         # Load into player
         if self.current_audio_path and os.path.exists(self.current_audio_path):
-            self.media_player.setSource(QUrl.fromLocalFile(self.current_audio_path))
+            self.player.load(self.current_audio_path)
             self.btn_play_pause.setEnabled(True)
             self.btn_stop.setEnabled(True)
             self.btn_save_as.setEnabled(True)
             self.btn_open_file.setEnabled(True)
+            self.btn_ext_play.setEnabled(True)
             # Auto play
-            self.media_player.play()
+            self.player.play()
 
     def _on_synth_error(self, err_msg: str):
         self.btn_synthesize.setEnabled(True)
@@ -1088,23 +1378,19 @@ class TTSMainWindow(QMainWindow):
 
     # Audio Player Handlers
     def _toggle_playback(self):
-        state = self.media_player.playbackState()
-        if state == QMediaPlayer.PlayingState:
-            self.media_player.pause()
+        if self.player.is_playing():
+            self.player.pause()
         else:
-            self.media_player.play()
+            self.player.play()
 
     def _stop_playback(self):
-        self.media_player.stop()
+        self.player.stop()
 
-    def _on_player_state_changed(self, state):
-        if state == QMediaPlayer.PlayingState:
-            self.btn_play_pause.setText("⏸ Tạm dừng")
-        else:
-            self.btn_play_pause.setText("▶ Phát")
+    def _on_player_state_changed(self, playing: bool):
+        self.btn_play_pause.setText("⏸ Tạm dừng" if playing else "▶ Phát")
 
     def _on_player_position_changed(self, pos_ms):
-        dur_ms = self.media_player.duration()
+        dur_ms = self.player.duration()
         if dur_ms > 0:
             val = int((pos_ms / dur_ms) * 1000)
             self.slider_timeline.blockSignals(True)
@@ -1117,13 +1403,17 @@ class TTSMainWindow(QMainWindow):
         self.lbl_total_time.setText(self._format_time(dur_ms))
 
     def _on_seek_timeline(self, val):
-        dur_ms = self.media_player.duration()
+        dur_ms = self.player.duration()
         if dur_ms > 0:
-            target_ms = int((val / 1000.0) * dur_ms)
-            self.media_player.setPosition(target_ms)
+            self.player.seek(int((val / 1000.0) * dur_ms))
 
     def _on_volume_changed(self, val):
-        self.audio_output.setVolume(val / 100.0)
+        self.player.set_volume(val / 100.0)
+
+    def _play_external(self):
+        if self.current_audio_path and os.path.exists(self.current_audio_path):
+            if sys.platform == "win32":
+                os.startfile(self.current_audio_path)
 
     def _format_time(self, ms: int) -> str:
         s = int(ms / 1000)

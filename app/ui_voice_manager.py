@@ -493,14 +493,14 @@ class VoiceManagerDialog(QDialog):
         
         btn_vtranslate = QPushButton("⚡ vTranslate (VI - 21 giọng)")
         btn_vtranslate.setStyleSheet("font-weight: bold; color: #80D8FF;")
-        btn_vtranslate.clicked.connect(lambda: self._start_scan("https://huggingface.co/buckets/bonelag/vTranslate"))
+        btn_vtranslate.clicked.connect(lambda: self._start_scan("https://huggingface.co/buckets/bonelag/voice"))
         preset_row.addWidget(btn_vtranslate)
 
         btn_rhasspy = QPushButton("🌟 Rhasspy Piper (Gốc - 170+ giọng)")
         btn_rhasspy.clicked.connect(lambda: self._start_scan("https://huggingface.co/rhasspy/piper-voices/tree/main"))
         preset_row.addWidget(btn_rhasspy)
 
-        btn_nghia = QPushButton("🇻🇳 NghiTTS (VI - 50 giọng)")
+        btn_nghia = QPushButton("🇻🇳 Kho giọng Việt (50 giọng)")
         btn_nghia.clicked.connect(lambda: self._start_scan("https://huggingface.co/doof-ferb/nghitts-copy"))
         preset_row.addWidget(btn_nghia)
 
