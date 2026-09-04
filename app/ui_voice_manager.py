@@ -67,7 +67,7 @@ def parse_huggingface_repo_id(url_or_repo: str) -> Tuple[str, str]:
     """
     clean = url_or_repo.strip().rstrip("/")
     if not clean:
-        return "rhasspy", "rhasspy/piper-voices"
+        return "bucket", "bonelag/voice"
 
     # Match /buckets/owner/repo
     m_bucket = re.search(r"huggingface\.co/buckets/([^/]+/[^/]+)", clean) or re.match(r"^buckets/([^/]+/[^/]+)", clean)
@@ -587,8 +587,8 @@ class VoiceManagerDialog(QDialog):
         self._setup_ui()
         self._apply_dialog_theme()
 
-        # Initial auto-scan of official repo
-        self._start_scan("https://huggingface.co/rhasspy/piper-voices/tree/main")
+        # Initial auto-scan of default TTSx bucket
+        self._start_scan("https://huggingface.co/buckets/bonelag/voice")
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -607,8 +607,8 @@ class VoiceManagerDialog(QDialog):
         source_layout.addWidget(lbl_src)
 
         url_row = QHBoxLayout()
-        self.txt_repo_url = QLineEdit("https://huggingface.co/rhasspy/piper-voices/tree/main")
-        self.txt_repo_url.setPlaceholderText("Dán link Hugging Face (ví dụ: https://huggingface.co/rhasspy/piper-voices hoặc user/repo)")
+        self.txt_repo_url = QLineEdit("https://huggingface.co/buckets/bonelag/voice")
+        self.txt_repo_url.setPlaceholderText("Dán link Hugging Face (ví dụ: https://huggingface.co/buckets/bonelag/voice hoặc user/repo)")
         self.txt_repo_url.returnPressed.connect(self._on_scan_clicked)
         url_row.addWidget(self.txt_repo_url)
 
@@ -622,15 +622,10 @@ class VoiceManagerDialog(QDialog):
         preset_row = QHBoxLayout()
         preset_row.addWidget(QLabel("Kho giọng:"))
         
-        btn_ttsx = QPushButton("🇻🇳 TTSx Studio (43 giọng)")
+        btn_ttsx = QPushButton("🇻🇳 TTSx (Mặc định)")
         btn_ttsx.setStyleSheet("font-weight: bold; color: #69F0AE;")
-        btn_ttsx.clicked.connect(lambda: self._start_scan("https://huggingface.co/bonelag/TTSx"))
+        btn_ttsx.clicked.connect(lambda: self._start_scan("https://huggingface.co/buckets/bonelag/voice"))
         preset_row.addWidget(btn_ttsx)
-
-        btn_vtranslate = QPushButton("⚡ vTranslate (VI - 21 giọng)")
-        btn_vtranslate.setStyleSheet("font-weight: bold; color: #80D8FF;")
-        btn_vtranslate.clicked.connect(lambda: self._start_scan("https://huggingface.co/buckets/bonelag/voice"))
-        preset_row.addWidget(btn_vtranslate)
 
         btn_rhasspy = QPushButton("🌟 Rhasspy Piper (Gốc - 170+ giọng)")
         btn_rhasspy.clicked.connect(lambda: self._start_scan("https://huggingface.co/rhasspy/piper-voices/tree/main"))
@@ -639,10 +634,6 @@ class VoiceManagerDialog(QDialog):
         btn_nghia = QPushButton("🇻🇳 Kho giọng Việt (50 giọng)")
         btn_nghia.clicked.connect(lambda: self._start_scan("https://huggingface.co/doof-ferb/nghitts-copy"))
         preset_row.addWidget(btn_nghia)
-
-        btn_mailinh = QPushButton("🇻🇳 MaiLinh TTS")
-        btn_mailinh.clicked.connect(lambda: self._start_scan("https://huggingface.co/beyoru/MaiLinh-TTS-CoreML"))
-        preset_row.addWidget(btn_mailinh)
 
         preset_row.addStretch()
         source_layout.addLayout(preset_row)
