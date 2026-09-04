@@ -47,6 +47,22 @@ def _resolve_piper_model_path(provider_voice: str) -> str:
         if os.path.exists(cand5):
             return cand5
 
+    cand_model = models_path("model", "piper", normalized)
+    if os.path.exists(cand_model):
+        return cand_model
+
+    filename = os.path.basename(normalized)
+    for sub in [
+        ("piper", filename),
+        ("piper-en", filename),
+        ("model", "piper", "vi", filename),
+        ("model", "piper", "en", filename),
+        ("model", "piper", "id", filename),
+    ]:
+        cand_sub = models_path(*sub)
+        if os.path.exists(cand_sub):
+            return cand_sub
+
     return cand1
 
 

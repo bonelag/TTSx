@@ -70,9 +70,12 @@ class TTSEngine:
         seen_ids = set()
 
         catalogs = [
-            app_path("voice_catalog.json"),
+            models_path("model", "piper", "voice.json"),
+            models_path("piper", "voice.json"),
+            models_path("model", "piper", "voices.json"),
             models_path("piper", "voices.json"),
             models_path("piper-en", "voices.json"),
+            app_path("voice_catalog.json"),
         ]
 
         for cat_file in catalogs:
@@ -148,6 +151,9 @@ class TTSEngine:
         search_dirs = [
             (models_path("piper"), "vi"),
             (models_path("piper-en"), "en"),
+            (models_path("model", "piper", "vi"), "vi"),
+            (models_path("model", "piper", "en"), "en"),
+            (models_path("model", "piper", "id"), "id"),
             (models_path(), "vi"),
         ]
 

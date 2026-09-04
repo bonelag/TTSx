@@ -242,75 +242,206 @@ class VoiceScanWorker(QThread):
             elif path.endswith(".onnx.json") or path.endswith(".json"):
                 json_entries[path] = item
 
-        results: List[VoiceModelItem] = []
-        for onnx_path, item in onnx_entries.items():
-            p = Path(onnx_path)
-            stem_name = p.stem
-            size_bytes = item.get("size", 0)
+        lang_names_map = {
+            "vi": "Tiếng Việt",
+            "en": "English",
+            "id": "Indonesia",
+            "ja": "日本語",
+            "zh": "中文",
+            "fr": "Français",
+            "de": "Deutsch",
+            "es": "Español",
+            "ko": "한국어",
+            "ru": "Русский",
+        }
 
-            # Look for matching json
-            json_candidate = str(p.with_suffix(".onnx.json")).replace("\\", "/")
-            if json_candidate not in json_entries:
-                json_candidate = str(p.with_suffix(".json")).replace("\\", "/")
-            if json_candidate not in json_entries:
+        # 1. Check for voice.json / voices.json in repository tree
+        voice_catalog_path = ""
+        for cand in ("voice.json", "voices.json", "piper/voice.json", "piper/voices.json", "models/model/piper/voice.json", "model/piper/voice.json"):
+            if cand in json_entries:
+                voice_catalog_path = cand
+                break
+        if not voice_catalog_path:
+            for path in json_entries:
+                p_lower = path.lower()
+                if p_lower.endswith("/voice.json") or p_lower.endswith("/voices.json") or p_lower in ("voice.json", "voices.json"):
+                    voice_catalog_path = path
+                    break
+
+        catalog_voices: List[dict] = []
+        if voice_catalog_path:
+            try:
+                self.progress_signal.emit(f"Phát hiện danh mục {voice_catalog_path}, đang đọc thông tin giọng đọc...")
+                if resolved_type == "bucket":
+                    cat_url = f"https://huggingface.co/buckets/{repo_id}/resolve/{voice_catalog_path}?download=true"
+                elif resolved_type == "dataset":
+                    cat_url = f"https://huggingface.co/datasets/{repo_id}/raw/main/{voice_catalog_path}"
+                else:
+                    cat_url = f"https://huggingface.co/{repo_id}/raw/main/{voice_catalog_path}"
+
+                req = urllib.request.Request(cat_url, headers={"User-Agent": "TTSx-Studio/1.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    cat_content = json.loads(resp.read().decode("utf-8"))
+
+                # Save a local cache of voice.json for local tts_engine loading
+                try:
+                    local_vjson_dest = Path(models_path("piper", "voice.json"))
+                    local_vjson_dest.parent.mkdir(parents=True, exist_ok=True)
+                    with open(local_vjson_dest, "w", encoding="utf-8") as f:
+                        json.dump(cat_content, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+
+                if isinstance(cat_content, dict):
+                    if "voices" in cat_content and isinstance(cat_content["voices"], list):
+                        catalog_voices = cat_content["voices"]
+                    else:
+                        catalog_voices = [dict(v, id=v.get("id", k)) for k, v in cat_content.items() if isinstance(v, dict)]
+                elif isinstance(cat_content, list):
+                    catalog_voices = cat_content
+            except Exception:
+                pass
+
+        def resolve_model_urls(onnx_p: str) -> Tuple[str, str, int]:
+            p = Path(onnx_p)
+            size = onnx_entries.get(onnx_p, {}).get("size", 0)
+            json_c = str(p.with_suffix(".onnx.json")).replace("\\", "/")
+            if json_c not in json_entries:
+                json_c = str(p.with_suffix(".json")).replace("\\", "/")
+            if json_c not in json_entries:
                 parent_config = str(p.parent / "config.json").replace("\\", "/")
                 if parent_config in json_entries:
-                    json_candidate = parent_config
+                    json_c = parent_config
                 elif "config.json" in json_entries:
-                    json_candidate = "config.json"
-
-            has_json = json_candidate in json_entries
+                    json_c = "config.json"
+            has_j = json_c in json_entries
 
             if resolved_type == "bucket":
-                onnx_url = f"https://huggingface.co/buckets/{repo_id}/resolve/{onnx_path}?download=true"
-                json_url = f"https://huggingface.co/buckets/{repo_id}/resolve/{json_candidate}?download=true" if has_json else ""
+                o_url = f"https://huggingface.co/buckets/{repo_id}/resolve/{onnx_p}?download=true"
+                j_url = f"https://huggingface.co/buckets/{repo_id}/resolve/{json_c}?download=true" if has_j else ""
             else:
-                onnx_url = f"https://huggingface.co/{repo_id}/resolve/main/{onnx_path}"
-                json_url = f"https://huggingface.co/{repo_id}/resolve/main/{json_candidate}" if has_json else f"{onnx_url}.json"
+                o_url = f"https://huggingface.co/{repo_id}/resolve/main/{onnx_p}"
+                j_url = f"https://huggingface.co/{repo_id}/resolve/main/{json_c}" if has_j else f"{o_url}.json"
+            return o_url, j_url, size
 
-            # Determine language only if explicit in path or repository context
+        def resolve_local_paths(filename: str, lang: str) -> Tuple[Path, Path, bool]:
+            j_name = f"{filename}.json"
+            target_dir = Path(models_path("piper-en")) if (lang or "").startswith("en") else local_piper_dir
+            l_onnx = target_dir / filename
+            l_json = target_dir / j_name
+            # Check existing file across local locations
+            for cand_dir in [
+                target_dir,
+                Path(models_path("model", "piper", lang or "vi")),
+                Path(models_path("model", "piper", "vi")),
+                Path(models_path("model", "piper", "en")),
+                Path(models_path("model", "piper", "id")),
+                local_piper_dir,
+            ]:
+                check_file = cand_dir / filename
+                if check_file.exists() and check_file.stat().st_size > 1024:
+                    return check_file, cand_dir / j_name, True
+            return l_onnx, l_json, l_onnx.exists() and l_onnx.stat().st_size > 1024
+
+        results: List[VoiceModelItem] = []
+        matched_onnx_paths = set()
+
+        # 2. Build items from catalog voice.json if present
+        for v in catalog_voices:
+            if not isinstance(v, dict):
+                continue
+            vid = str(v.get("id", "")).strip()
+            pvoice = str(v.get("provider_voice") or v.get("onnx_path") or "").replace("\\", "/").strip().lstrip("/")
+
+            matched_path = None
+            if pvoice:
+                if pvoice in onnx_entries:
+                    matched_path = pvoice
+                else:
+                    for op in onnx_entries:
+                        if op.endswith(pvoice) or os.path.basename(op) == os.path.basename(pvoice):
+                            matched_path = op
+                            break
+            if not matched_path and vid:
+                for op in onnx_entries:
+                    stem = Path(op).stem.lower()
+                    if stem == vid.lower() or stem.startswith(vid.lower()):
+                        matched_path = op
+                        break
+
+            if not matched_path:
+                continue
+
+            matched_onnx_paths.add(matched_path)
+            onnx_url, json_url, size_bytes = resolve_model_urls(matched_path)
+            model_filename = Path(matched_path).name
+
+            lang_code = str(v.get("language") or "vi").lower()
+            lang_name = lang_names_map.get(lang_code, lang_code.upper())
+            accent = str(v.get("accent") or "")
+            gender = str(v.get("gender") or "")
+            name = str(v.get("name") or vid or Path(matched_path).stem.capitalize())
+            quality = str(v.get("quality") or "")
+            if not quality:
+                stem_lower = Path(matched_path).stem.lower()
+                quality = "44.1kHz" if "44k" in stem_lower else ("High" if "high" in stem_lower else "Medium")
+
+            l_onnx, l_json, is_down = resolve_local_paths(model_filename, lang_code)
+
+            results.append(
+                VoiceModelItem(
+                    voice_id=vid or Path(matched_path).stem,
+                    name=name,
+                    language_code=lang_code,
+                    country_code=accent,
+                    language_name=lang_name,
+                    gender=gender,
+                    quality=quality,
+                    onnx_url=onnx_url,
+                    json_url=json_url,
+                    onnx_size_bytes=size_bytes,
+                    is_downloaded=is_down,
+                    local_onnx_path=str(l_onnx),
+                    local_json_path=str(l_json),
+                    repo_source=repo_id,
+                )
+            )
+
+        # 3. Process remaining uncataloged ONNX files (fallback heuristic)
+        for onnx_path, item in onnx_entries.items():
+            if onnx_path in matched_onnx_paths:
+                continue
+            p = Path(onnx_path)
+            stem_name = p.stem
+            onnx_url, json_url, size_bytes = resolve_model_urls(onnx_path)
+
+            # Determine language
             lang_code = ""
             lang_name = ""
-            m_lang = re.search(r"(?:^|[/_\-])(vi_vn|vi|en_us|en_gb|en|ja_jp|ja|zh_cn|zh|fr_fr|fr|de_de|de|es_es|es|ko_kr|ko|ru_ru|ru)(?:[/_\-]|\.|$)", onnx_path.lower())
+            m_lang = re.search(r"(?:^|[/_\-])(vi_vn|vi|en_us|en_gb|en|id_id|id|ja_jp|ja|zh_cn|zh|fr_fr|fr|de_de|de|es_es|es|ko_kr|ko|ru_ru|ru)(?:[/_\-]|\.|$)", onnx_path.lower())
             if m_lang:
                 raw_code = m_lang.group(1).lower().split("_")[0]
                 lang_code = raw_code
-                lang_names_map = {
-                    "vi": "Tiếng Việt",
-                    "en": "English",
-                    "ja": "日本語",
-                    "zh": "中文",
-                    "fr": "Français",
-                    "de": "Deutsch",
-                    "es": "Español",
-                    "ko": "한국어",
-                    "ru": "Русский",
-                }
                 lang_name = lang_names_map.get(raw_code, raw_code.upper())
             elif any(k in repo_id.lower() for k in ("vtranslate", "bonelag", "viet", "nghit", "mailinh")):
                 lang_code = "vi"
                 lang_name = "Tiếng Việt"
 
-            # Determine gender only if explicit in filename or recognized name
+            # Determine gender
             gender = ""
             stem_lower = stem_name.lower()
             if re.search(r"(?:^|[_/\-])(female|woman)(?:[_/\-]|\d|$)", stem_lower) or any(
-                stem_lower.startswith(fn) for fn in ("hoaimy", "ngochuyen", "ngocngan", "maiphuong", "hongtuyen", "huyenngoc", "leyen", "banmai", "cuc")
+                stem_lower.startswith(fn) for fn in ("hoaimy", "ngochuyen", "ngocngan", "maiphuong", "hongtuyen", "huyenngoc", "leyen", "banmai", "cuc", "thutrang")
             ):
                 gender = "female"
             elif re.search(r"(?:^|[_/\-])(male|man)(?:[_/\-]|\d|$)", stem_lower) or any(
-                stem_lower.startswith(mn) for mn in ("namminh", "namtutin", "dungdien", "duyoryx", "minhquang", "lacphi", "doanhdoanh", "chieuthanh")
+                stem_lower.startswith(mn) for mn in ("namminh", "namtutin", "dungdien", "duyoryx", "minhquang", "lacphi", "doanhdoanh", "chieuthanh", "adam", "thientam", "minhkhang", "vietthao")
             ):
                 gender = "male"
 
             quality = "44.1kHz" if "44k" in stem_lower else ("High" if "high" in stem_lower else ("Medium" if "medium" in stem_lower else ("Low" if "low" in stem_lower else "")))
-
             model_filename = p.name
-            json_filename = f"{model_filename}.json"
-            local_onnx = local_piper_dir / model_filename
-            local_json = local_piper_dir / json_filename
-            is_downloaded = local_onnx.exists() and local_onnx.stat().st_size > 1024
-
+            l_onnx, l_json, is_down = resolve_local_paths(model_filename, lang_code)
             pretty_name = stem_name.replace("_", " ").replace("-", " ").capitalize()
 
             results.append(
@@ -325,9 +456,9 @@ class VoiceScanWorker(QThread):
                     onnx_url=onnx_url,
                     json_url=json_url,
                     onnx_size_bytes=size_bytes,
-                    is_downloaded=is_downloaded,
-                    local_onnx_path=str(local_onnx),
-                    local_json_path=str(local_json),
+                    is_downloaded=is_down,
+                    local_onnx_path=str(l_onnx),
+                    local_json_path=str(l_json),
                     repo_source=repo_id,
                 )
             )
@@ -491,6 +622,11 @@ class VoiceManagerDialog(QDialog):
         preset_row = QHBoxLayout()
         preset_row.addWidget(QLabel("Kho giọng:"))
         
+        btn_ttsx = QPushButton("🇻🇳 TTSx Studio (43 giọng)")
+        btn_ttsx.setStyleSheet("font-weight: bold; color: #69F0AE;")
+        btn_ttsx.clicked.connect(lambda: self._start_scan("https://huggingface.co/bonelag/TTSx"))
+        preset_row.addWidget(btn_ttsx)
+
         btn_vtranslate = QPushButton("⚡ vTranslate (VI - 21 giọng)")
         btn_vtranslate.setStyleSheet("font-weight: bold; color: #80D8FF;")
         btn_vtranslate.clicked.connect(lambda: self._start_scan("https://huggingface.co/buckets/bonelag/voice"))
