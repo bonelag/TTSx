@@ -5,3 +5,4 @@ __*
 venv
 models/*
 setting.json
+app/setting.json
